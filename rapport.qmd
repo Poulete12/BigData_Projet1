@@ -1,0 +1,736 @@
+---
+title: "Analyse Stylométrique de La Comédie Humaine"
+author: "Asso et Antony"
+date: "12/05/2025"
+format:
+  html:
+    output-file: report.html
+  
+execute: 
+  eval: true
+  echo: false
+
+engine: jupyter
+
+---
+
+  La Comédie humaine d’Honoré de Balzac regroupe environ 92 textes qui dressent un portrait détaillé de la société française du XIXᵉ siècle. Ce projet vise à extraire ces fichiers, les nettoyer et réaliser une annotation linguistique afin de mener une analyse stylométrique approfondie. Chaque graphique illustrera un aspect différent de l’œuvre, avec une explication succincte avant et une interprétation suivie d’une conclusion après le graphique.
+  
+# Introduction : Extraction des données
+
+  Cette première partie décrit les données que nous allons extraire (environ 92 textes de La Comédie humaine) ainsi que le pipeline d'extraction.
+Nous clonons le dépôt Git contenant les textes et la métadonnée, et nous nous assurons d'extraire uniquement le dossier contenant les fichiers texte ainsi que le fichier metadata.csv.
+
+```{python}
+import os
+import git
+import shutil
+
+GIT_REPO_URL = "https://github.com/dh-trier/balzac.git"
+CLONE_PATH = "./DATA/"
+TEXT_DIR = os.path.join(CLONE_PATH, "texts")
+
+def clone_extract(repo_url, clone_path):
+    if os.path.exists(clone_path):
+        print("Le dossier DATA existe déjà. Extraction déjà réalisée.")
+        # Lister tous les fichiers .txt
+        txt_files = [f for f in os.listdir(TEXT_DIR) if f.endswith(".txt")]
+        print(f"{len(txt_files)} fichiers trouvés dans le dossier {TEXT_DIR}.")
+        
+        return txt_files
+    else:
+        git.Repo.clone_from(repo_url, clone_path)
+        old_plain_path = os.path.join(clone_path, "plain")
+        os.rename(old_plain_path, TEXT_DIR)
+    
+        txt_files = [f for f in os.listdir(TEXT_DIR) if f.endswith(".txt")]
+        print(f"{len(txt_files)} fichiers extrait depuis le git.")
+        
+        # Nettoyer le contenu de DATA : ne conserver que le dossier texts et metadata.csv
+        for entry in os.listdir(clone_path):
+            if entry not in ("texts", "metadata.csv"):
+                full_path = os.path.join(clone_path, entry)
+                if os.path.isdir(full_path):
+                    shutil.rmtree(full_path)
+                else:
+                    os.remove(full_path)
+    
+        return txt_files
+
+# Exécution de la fonction
+txt_files = clone_extract(GIT_REPO_URL, CLONE_PATH)
+
+```
+
+
+# Prétraitement des Données
+
+
+Dans cette section, nous réalisons le chargement et la transformation des textes extraits. Un prétraitement est appliqué pour nettoyer les fichiers :
+
+ - Suppression des astérisques (pour enlever les marquages typographiques superflus),
+ - Remplacement des retours à la ligne par des espaces (pour une continuité des phrases),
+ - Réduction des espaces multiples (pour normaliser la mise en forme).
+
+```{python}
+import pandas as pd
+
+# Fonction de nettoyage du texte
+def clean_text(text):
+    text = text.replace('*', '')
+    text = text.replace('\n', ' ')
+    text = " ".join(text.split())
+    return text.strip()
+
+
+rows = []
+# Parcourir chaque fichier dans DATA/texts
+for filename in txt_files:
+    file_path = os.path.join(TEXT_DIR, filename)
+    with open(file_path, "r", encoding="utf-8") as f:
+        text = f.read()
+        
+    cleaned_text = clean_text(text)
+    
+    title = os.path.splitext(filename)[0]
+    rows.append({"title": title, "text": cleaned_text})
+    
+
+# Création d'un DataFrame récapitulatif pour visualiser les textes nettoyés
+txt_clean = pd.DataFrame(rows, columns=["title", "text"])
+txt_clean.head()
+
+```
+
+
+
+_L'objectif de cette partie est de transformer les textes tel que cela facilite l'analyse ultérieure._
+
+# Annotation Linguistique avec spaCy
+
+Nous utilisons ici le modèle spaCy fr_core_news_md pour extraire des caractéristiques linguistiques utiles pour l’analyse stylométrique :
+– le nombre de tokens, de mots et de phrases
+– le comptage des parties du discours (verbes, noms, adjectifs, pronoms)
+– la répartition des temps verbaux (passé, présent, futur)
+– des ratios par rapport au nombre total de mots
+
+Pour accélérer le traitement, nous utilisons dask.bag pour paralléliser le travail.
+
+
+```{python}
+import dask.bag as db
+import spacy
+from collections import Counter
+
+nlp = spacy.load("fr_core_news_md")
+
+
+def annotate_record(record):
+    from collections import Counter 
+    doc = nlp(record["text"])
+
+    nb_tokens = len(doc)
+    nb_words = sum(not token.is_space and not token.is_punct for token in doc)
+    nb_sentences = sum(1 for _ in doc.sents)
+
+    # Comptage des catégories grammaticales (POS)
+    pos_counter = Counter(token.pos_ for token in doc if not token.is_space)
+    nb_verbs = pos_counter.get("VERB", 0)
+    nb_nouns = pos_counter.get("NOUN", 0)
+    nb_adjs = pos_counter.get("ADJ", 0)
+    nb_pron = pos_counter.get("PRON", 0) 
+
+    # Comptage de la distribution des temps verbaux
+    tense_counter = Counter()
+    for token in doc:
+        if token.pos_ == "VERB":
+            morph = token.morph
+            if "Tense=Pres" in morph:
+                tense_counter["Present"] += 1
+            elif "Tense=Past" in morph:
+                tense_counter["Past"] += 1
+            elif "Tense=Fut" in morph:
+                tense_counter["Future"] += 1
+                
+    verbs_present = tense_counter["Present"]
+    verbs_past = tense_counter["Past"]
+    verbs_future = tense_counter["Future"]
+  
+    avg_sentence_length = nb_words / nb_sentences if nb_sentences else 0
+    
+    # Ratios sur l'ensemble des mots
+    ratio_verbs = nb_verbs / nb_words if nb_words else 0
+    ratio_nouns = nb_nouns / nb_words if nb_words else 0
+    ratio_adjs  = nb_adjs  / nb_words if nb_words else 0
+    ratio_pron  = nb_pron  / nb_words if nb_words else 0
+
+    # Ratios de temps verbaux parmi *tous les verbes*
+    ratio_past = verbs_past / nb_verbs if nb_verbs else 0
+    ratio_present = verbs_present / nb_verbs if nb_verbs else 0
+    ratio_future = verbs_future / nb_verbs if nb_verbs else 0
+    
+    return {
+        "titre": record["title"],
+        "nb_tokens": nb_tokens,
+        "nb_words": nb_words,
+        "nb_sentences": nb_sentences,
+        "nb_verbs": nb_verbs,
+        "nb_nouns": nb_nouns,
+        "nb_adjs": nb_adjs,
+        "verbs_present": tense_counter["Present"],
+        "verbs_past": tense_counter["Past"],
+        "verbs_future": tense_counter["Future"],
+        "avg_sentence_length": avg_sentence_length,
+        "ratio_verbs": ratio_verbs,
+        "ratio_nouns": ratio_nouns,
+        "ratio_adjs": ratio_adjs,
+        "ratio_pron": ratio_pron,
+        "ratio_past": ratio_past,
+        "ratio_present": ratio_present,
+        "ratio_future": ratio_future
+    }
+
+
+if os.path.exists("balzac_annotation.csv"):
+    txt_annotation = pd.read_csv("balzac_annotation.csv")
+    print("Annotations chargées depuis le fichier CSV existant.")
+else:
+    records = txt_clean.to_dict("records")
+    bag = db.from_sequence(records, npartitions=20)
+    results = bag.map(annotate_record).compute(scheduler="threads")
+    
+    txt_annotation = pd.DataFrame(results)
+    txt_annotation.to_csv("balzac_annotation.csv", index=False, encoding="utf-8")
+
+txt_annotation.describe().T.drop(columns="count").style.background_gradient(
+    cmap="Blues", 
+    subset=["mean","50%"]
+)
+```
+
+
+  Ainsi cela nous permet d'obtenir une annotation riche permettant d'extraire des caractéristiques quantitatives essentielles pour la stylométrie. 
+
+# Analyse Stylométrique 
+
+  Cette dernière partie du rapport se concentre exclusivement sur l'analyse des données issues de l'annotation. Nous avons choisi plusieurs axes pour questionner la diversité stylistique de Balzac, sans prétendre apporter une nouvelle interprétation littéraire, mais en commentant uniquement les données.
+
+## Distribution Moyenne des Parties du Discours
+
+  Dans ce graphique, nous présentons la répartition moyenne (en %) des adjectifs, des noms propres et des verbes dans l'ensemble des textes. L'objectif est de visualiser, dès le départ, l'orientation lexicale dominante de Balzac.
+
+```{python}
+import plotly.express as px
+
+mean_percentages = {
+    "Adjectifs": txt_annotation["ratio_adjs"].mean() * 100,
+    "Nom Propre": txt_annotation["ratio_pron"].mean() * 100,
+    "Verbes": txt_annotation["ratio_verbs"].mean() * 100
+}
+
+# Création du camembert
+pie_chart = px.pie(
+    names=list(mean_percentages.keys()),
+    values=list(mean_percentages.values()),
+    title="Distribution moyenne des parties du discours (%)",
+    labels={"names": "Catégorie", "value": "Pourcentage"}
+)
+
+# Personnaliser l'affichage : afficher les pourcentages et les labels, avec un léger décollement pour chaque segment
+pie_chart.update_layout(width=500, height=500)
+pie_chart.update_traces(textinfo='percent+label', pull=[0.08, 0.08, 0.08])
+pie_chart.show()
+```
+
+
+  Le camembert révèle une prédominance marquée des verbes, indiquant que la narration de Balzac est essentiellement orientée vers l’action et le dynamisme des événements. La part significative des noms propres souligne l'importance accordée à la caractérisation des personnages et aux interactions sociales, reflet de la richesse du panorama humain dans son œuvre. Enfin, la part relativement faible des adjectifs suggère que, même si les descriptions jouent un rôle dans la création d’ambiances, elles restent secondaires par rapport à l’aspect narratif et dialogué. Cette répartition met en lumière une tendance générale dans le style de Balzac.
+
+## Distribution du Nombre de Verbes par Genre
+
+  À partir du camembert, nous avons constaté que les verbes occupent une part dominante dans l'ensemble du corpus. Cette observation nous a conduits à nous interroger sur la manière dont l'utilisation des verbes varie selon le genre littéraire (romans, essais, nouvelles, etc.). Nous avons opté pour un boxplot car cette visualisation permet de mettre en avant la tendance centrale, la dispersion ainsi que les éventuelles valeurs extrêmes pour chaque genre, offrant ainsi une analyse précise de cette distribution.
+
+  
+```{python}
+#Un left join pour avoir le genre pour chaque text
+metadata = pd.read_csv("DATA/metadata.csv", encoding="utf-8")
+txt_genre = pd.merge(txt_annotation, metadata[["id", "genre"]], left_on="titre", right_on="id", how="left")
+
+# Création du boxplot
+fig = px.box(
+    txt_genre,
+    x="genre",
+    y="nb_verbs",
+    color="genre", 
+    title="Distribution du nombre total de verbes par genre",
+    labels={
+        "genre": "Genre",
+        "nb_verbs": "Nombre total de verbes"
+    }
+)
+
+
+fig.update_layout(
+    width=780,
+    height=600,
+)
+
+fig.show()
+```
+
+  L'analyse de ce boxplot révèle que certains genres, en particulier les romans, présentent une grande variabilité dans l'usage des verbes alors que d'autres, tels que les essais, sont plus homogènes. Cette constatation soulève une question importante pour la suite de notre étude : dans quelle mesure la distribution des verbes, et potentiellement celle des temps verbaux, influence-t-elle la dynamique narrative propre à chaque genre ? Cette interrogation nous conduit naturellement à explorer la répartition des temps verbaux à l'aide d'un bar plot.
+
+## Répartition des Temps Verbaux
+
+   Dans cette section, nous approfondissons l'analyse initiée par le boxplot en nous intéressant à la répartition des temps verbaux dans chaque texte. Le graphique en barres empilées a été choisi pour illustrer de manière claire et structurée comment les verbes conjugués au passé, au présent et au futur contribuent à la dynamique narrative de Balzac, en mettant en exergue la prédominance temporelle de chaque texte.
+
+```{python}
+import plotly.express as px
+
+# Renommage des colonnes pour afficher des noms plus "propres"
+txt_annotation['Passé']    = txt_annotation['verbs_past']
+txt_annotation['Présent']  = txt_annotation['verbs_present']
+txt_annotation['Futur']    = txt_annotation['verbs_future']
+
+# Liste des colonnes à utiliser pour le graphique (les temps verbaux)
+temps_verbal = ["Passé", "Présent", "Futur"]
+
+# Création du graphique en barres empilées 
+fig = px.bar(
+    txt_annotation,                          
+    x="titre",                               
+    y=temps_verbal,                          
+    title="Répartition des verbes par temps pour chaque texte",
+    barmode="stack",                         
+    labels={
+        "titre": "Titre de l'œuvre ",
+        "value": "Nombre de verbes ",
+        "variable": "Temps " 
+    }
+)
+
+fig.update_layout(
+    width=780,
+    height=600,
+    xaxis=dict(tickangle=45),
+    margin=dict(l=50, r=50, t=80, b=120)
+)
+
+fig.show()
+```
+
+  L'interprétation du barplot révèle que,l'utilisation des temps verbaux au passé et au présent est globalement équivalente. Autrement dit, Balzac semble exploiter autant le passé (souvent perçu comme le marqueur d'une narration rétrospective) que le présent (qui insuffle une dimension d'immédiateté) dans ses récits. En revanche, le futur demeure largement minoritaire par rapport aux deux autres temps. Cette répartition suggère une dynamique narrative où la rétrospection et l'instant présent coexistent, tandis que la projection vers l'avenir joue un rôle presque négligeable dans la construction du récit.
+  
+## Analyse en Composantes Principales (ACP)
+
+  À partir de l'interprétation du barplot, on observe que l'utilisation des temps verbaux au passé et au présent est équivalente tandis que le futur reste très marginal. Autrement dit, Balzac ne se limite pas à une narration exclusivement rétrospective ; ses textes intègrent simultanément des éléments narratifs (rappelés par l'usage du passé) et des indices d'immédiateté (signalés par l'usage du présent). Cette observation nous incite à nous interroger sur la façon dont ces dimensions temporelles, combinées à d'autres caractéristiques lexicales, concourent à forger l'identité stylistique de chaque œuvre.
+
+  Ainsi,on pourrait demander : _"Dans quelle mesure la coexistence d'un usage équitable du passé et du présent, complétée par un faible recours au futur, révèle-t-elle des tendances stylistiques permettant de distinguer les œuvres de Balzac selon une orientation principalement narrative (action) ou descriptives ?"_
+  
+  
+```{python}
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+
+features = [
+    "ratio_adjs",
+    "ratio_verbs",
+    "ratio_nouns",
+    "ratio_past",
+    "ratio_present",
+    "ratio_future"
+]
+# Extraire la matrice
+X = txt_annotation[features].copy()
+
+# Standardiser
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# PCA avec 2 composantes
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X_scaled)
+
+#Ajouter PC1, PC2 dans le DataFrame
+txt_annotation["PC1"] = X_pca[:, 0]
+txt_annotation["PC2"] = X_pca[:, 1]
+
+
+# Création du ACP
+fig = px.scatter(
+    txt_annotation,
+    x="PC1",
+    y="PC2",
+    hover_data=["titre"],    
+    color="ratio_verbs",    
+    title="ACP (descriptif vs action) : PC1 vs PC2",
+    labels={
+        "PC1": "Composante 1",
+        "PC2": "Composante 2",
+        "titre": "Titre",
+        "ratio_verbs": "Ratio de verbes"
+    },
+    width=780,
+    height=600
+)
+fig.show()
+```
+
+  L’analyse de l’ACP met en évidence une séparation claire des textes de Balzac selon leur ratio de verbes : ceux présentant une densité verbale élevée (aux couleurs chaudes) se situent majoritairement en haut et à droite du graphique, tandis que ceux à faible ratio (couleurs froides) se concentrent en bas à gauche. Cette structure suggère l’existence d’un continuum stylistique allant d’une écriture descriptive (faible usage de verbes, équilibre temporel) à une écriture plus narrative et dynamique (forte densité verbale). Ainsi, malgré un usage globalement équivalent du passé et du présent, l’ACP révèle que la combinaison des ratios lexicaux et des temps verbaux permet de distinguer deux tendances stylistiques marquées dans l’œuvre de Balzac.
+  
+
+## Dendrogramme hiérarchique des œuvres de Balzac
+
+  Afin d'explorer les proximités stylistiques entre les textes de La Comédie Humaine, nous avons appliqué une classification hiérarchique ascendante sur la base des ratios stylistiques extraits précédemment (adjectifs, verbes, noms, temps verbaux). Le dendrogramme ci-dessous représente la distance entre les textes : plus deux textes sont proches dans l’arbre, plus leur profil stylistique est similaire. La coupure visuelle en deux grandes branches suggère une dichotomie nette dans les styles d’écriture.
+  
+
+```{python}
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from scipy.cluster.hierarchy import linkage, dendrogram
+
+plt.figure(figsize=(15, 7))  
+
+Z = linkage(X,method='ward')
+
+#Création du dendrograme
+dendrogram(
+    Z,
+    labels=txt_annotation["titre"].values,   
+    leaf_rotation=90,                   
+    leaf_font_size=8,                  
+    distance_sort='ascending'
+)
+
+plt.title("Dendrogramme des textes ")
+plt.xlabel("Titre de l'œuvre")
+plt.ylabel("Distance (similitude)")
+
+plt.tight_layout()
+plt.show()
+```
+
+
+  On observe deux grands clusters distincts, indiquant qu’il existe un axe de séparation majeur dans l’œuvre de Balzac. Le groupe de gauche regroupe des textes stylistiquement très proches, probablement plus descriptifs ou homogènes sur le plan lexical. Le groupe de droite semble, quant à lui, rassembler des œuvres plus dynamiques ou contrastées, avec des structures verbales plus marquées. Ces deux pôles sont eux-mêmes subdivisés en sous-groupes, ce qui témoigne de nuances stylistiques internes à chaque orientation.
+   Ces regroupements font écho à l’axe « descriptif vs narratif » observé dans l’ACP, renforçant l’idée que certains textes partagent un ADN stylistique commun. L’analyse hiérarchique révèle ainsi que l’identité littéraire de Balzac s’exprime à travers des motifs récurrents et reconnaissables, qui traversent les genres et les récits.
+
+
+# Appendice 
+
+Dans cette section, nous récapitulons l'intégralité du code utilisé
+
+```{python}
+#|  echo: true
+#|  eval: false
+import os
+import git
+import shutil
+
+GIT_REPO_URL = "https://github.com/dh-trier/balzac.git"
+CLONE_PATH = "./DATA/"
+TEXT_DIR = os.path.join(CLONE_PATH, "texts")
+
+def clone_extract(repo_url, clone_path):
+    if os.path.exists(clone_path):
+        print("Le dossier DATA existe déjà. Extraction déjà réalisée.")
+        # Lister tous les fichiers .txt
+        txt_files = [f for f in os.listdir(TEXT_DIR) if f.endswith(".txt")]
+        print(f"{len(txt_files)} fichiers trouvés dans le dossier {TEXT_DIR}.")
+        
+        return txt_files
+    else:
+        git.Repo.clone_from(repo_url, clone_path)
+        old_plain_path = os.path.join(clone_path, "plain")
+        os.rename(old_plain_path, TEXT_DIR)
+    
+        txt_files = [f for f in os.listdir(TEXT_DIR) if f.endswith(".txt")]
+        print(f"{len(txt_files)} fichiers extrait depuis le git.")
+        
+        # Nettoyer le contenu de DATA : ne conserver que le dossier texts et metadata.csv
+        for entry in os.listdir(clone_path):
+            if entry not in ("texts", "metadata.csv"):
+                full_path = os.path.join(clone_path, entry)
+                if os.path.isdir(full_path):
+                    shutil.rmtree(full_path)
+                else:
+                    os.remove(full_path)
+    
+        return txt_files
+
+# Exécution de la fonction
+txt_files = clone_extract(GIT_REPO_URL, CLONE_PATH)
+######################################################################################
+import pandas as pd
+
+# Fonction de nettoyage du texte
+def clean_text(text):
+    text = text.replace('*', '')
+    text = text.replace('\n', ' ')
+    text = " ".join(text.split())
+    return text.strip()
+
+
+rows = []
+# Parcourir chaque fichier dans DATA/texts
+for filename in txt_files:
+    file_path = os.path.join(TEXT_DIR, filename)
+    with open(file_path, "r", encoding="utf-8") as f:
+        text = f.read()
+        
+    cleaned_text = clean_text(text)
+    
+    title = os.path.splitext(filename)[0]
+    rows.append({"title": title, "text": cleaned_text})
+    
+
+# Création d'un DataFrame récapitulatif pour visualiser les textes nettoyés
+txt_clean = pd.DataFrame(rows, columns=["title", "text"])
+txt_clean.head()
+######################################################################################
+import dask.bag as db
+import spacy
+from collections import Counter
+
+nlp = spacy.load("fr_core_news_md")
+
+#Fonction permettant d'annoter
+def annotate_record(record):
+    from collections import Counter 
+    doc = nlp(record["text"])
+
+    nb_tokens = len(doc)
+    nb_words = sum(not token.is_space and not token.is_punct for token in doc)
+    nb_sentences = sum(1 for _ in doc.sents)
+
+    # Comptage des catégories grammaticales (POS)
+    pos_counter = Counter(token.pos_ for token in doc if not token.is_space)
+    nb_verbs = pos_counter.get("VERB", 0)
+    nb_nouns = pos_counter.get("NOUN", 0)
+    nb_adjs = pos_counter.get("ADJ", 0)
+    nb_pron = pos_counter.get("PRON", 0) 
+
+    # Comptage de la distribution des temps verbaux
+    tense_counter = Counter()
+    for token in doc:
+        if token.pos_ == "VERB":
+            morph = token.morph
+            if "Tense=Pres" in morph:
+                tense_counter["Present"] += 1
+            elif "Tense=Past" in morph:
+                tense_counter["Past"] += 1
+            elif "Tense=Fut" in morph:
+                tense_counter["Future"] += 1
+                
+    verbs_present = tense_counter["Present"]
+    verbs_past = tense_counter["Past"]
+    verbs_future = tense_counter["Future"]
+  
+    avg_sentence_length = nb_words / nb_sentences if nb_sentences else 0
+    
+    # Ratios sur l'ensemble des mots
+    ratio_verbs = nb_verbs / nb_words if nb_words else 0
+    ratio_nouns = nb_nouns / nb_words if nb_words else 0
+    ratio_adjs  = nb_adjs  / nb_words if nb_words else 0
+    ratio_pron  = nb_pron  / nb_words if nb_words else 0
+
+    # Ratios de temps verbaux parmi *tous les verbes*
+    ratio_past = verbs_past / nb_verbs if nb_verbs else 0
+    ratio_present = verbs_present / nb_verbs if nb_verbs else 0
+    ratio_future = verbs_future / nb_verbs if nb_verbs else 0
+    
+    return {
+        "titre": record["title"],
+        "nb_tokens": nb_tokens,
+        "nb_words": nb_words,
+        "nb_sentences": nb_sentences,
+        "nb_verbs": nb_verbs,
+        "nb_nouns": nb_nouns,
+        "nb_adjs": nb_adjs,
+        "verbs_present": tense_counter["Present"],
+        "verbs_past": tense_counter["Past"],
+        "verbs_future": tense_counter["Future"],
+        "avg_sentence_length": avg_sentence_length,
+        "ratio_verbs": ratio_verbs,
+        "ratio_nouns": ratio_nouns,
+        "ratio_adjs": ratio_adjs,
+        "ratio_pron": ratio_pron,
+        "ratio_past": ratio_past,
+        "ratio_present": ratio_present,
+        "ratio_future": ratio_future
+    }
+
+# Vérification si l'annotation a déja été faite (gain de temps pour recompilier)
+if os.path.exists("balzac_annotation.csv"):
+    txt_annotation = pd.read_csv("balzac_annotation.csv")
+    print("Annotations chargées depuis le fichier CSV existant.")
+else:
+    records = txt_clean.to_dict("records")
+    bag = db.from_sequence(records, npartitions=20)
+    results = bag.map(annotate_record).compute(scheduler="threads")
+    
+    txt_annotation = pd.DataFrame(results)
+    txt_annotation.to_csv("balzac_annotation.csv", index=False, encoding="utf-8")
+
+# Tableau avec divers stats
+txt_annotation.describe().T.drop(columns="count").style.background_gradient(
+    cmap="Blues", 
+    subset=["mean","50%"]
+)
+######################################################################################
+import plotly.express as px
+
+mean_percentages = {
+    "Adjectifs": txt_annotation["ratio_adjs"].mean() * 100,
+    "Nom Propre": txt_annotation["ratio_pron"].mean() * 100,
+    "Verbes": txt_annotation["ratio_verbs"].mean() * 100
+}
+
+# Création du camembert
+pie_chart = px.pie(
+    names=list(mean_percentages.keys()),
+    values=list(mean_percentages.values()),
+    title="Distribution moyenne des parties du discours (%)",
+    labels={"names": "Catégorie", "value": "Pourcentage"}
+)
+
+# Personnaliser l'affichage : afficher les pourcentages et les labels, avec un léger décollement pour chaque segment
+pie_chart.update_layout(width=500, height=500)
+pie_chart.update_traces(textinfo='percent+label', pull=[0.08, 0.08, 0.08])
+pie_chart.show()
+######################################################################################
+# Un left join pour avoir le genre pour chaque text
+metadata = pd.read_csv("DATA/metadata.csv", encoding="utf-8")
+txt_genre = pd.merge(txt_annotation, metadata[["id", "genre"]], left_on="titre", right_on="id", how="left")
+
+# Création du boxplot
+fig = px.box(
+    txt_genre,
+    x="genre",
+    y="nb_verbs",
+    color="genre", 
+    title="Distribution du nombre total de verbes par genre",
+    labels={
+        "genre": "Genre",
+        "nb_verbs": "Nombre total de verbes"
+    }
+)
+
+
+fig.update_layout(
+    width=780,
+    height=600,
+)
+
+fig.show()
+######################################################################################
+import plotly.express as px
+
+# Renommage des colonnes pour afficher des noms plus "propres"
+txt_annotation['Passé'] = txt_annotation['verbs_past']
+txt_annotation['Présent'] = txt_annotation['verbs_present']
+txt_annotation['Futur'] = txt_annotation['verbs_future']
+
+# Liste des colonnes à utiliser pour le graphique (les temps verbaux)
+temps_verbal = ["Passé", "Présent", "Futur"]
+
+# Création du graphique en barres empilées 
+fig = px.bar(
+    txt_annotation,                          
+    x="titre",                               
+    y=temps_verbal,                          
+    title="Répartition des verbes par temps pour chaque texte",
+    barmode="stack",                         
+    labels={
+        "titre": "Titre de l'œuvre ",
+        "value": "Nombre de verbes ",
+        "variable": "Temps " 
+    }
+)
+
+fig.update_layout(
+    width=780,
+    height=600,
+    xaxis=dict(tickangle=45),
+    margin=dict(l=50, r=50, t=80, b=120)
+)
+
+fig.show()
+######################################################################################
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+
+features = [
+    "ratio_adjs",
+    "ratio_verbs",
+    "ratio_nouns",
+    "ratio_past",
+    "ratio_present",
+    "ratio_future"
+]
+# Extraire la matrice
+X = txt_annotation[features].copy()
+
+# Standardiser
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# PCA avec 2 composantes
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X_scaled)
+
+#Ajouter PC1, PC2 dans le DataFrame
+txt_annotation["PC1"] = X_pca[:, 0]
+txt_annotation["PC2"] = X_pca[:, 1]
+
+
+# Création du ACP
+fig = px.scatter(
+    txt_annotation,
+    x="PC1",
+    y="PC2",
+    hover_data=["titre"],    
+    color="ratio_verbs",    
+    title="ACP (descriptif vs action) : PC1 vs PC2",
+    labels={
+        "PC1": "Composante 1",
+        "PC2": "Composante 2",
+        "titre": "Titre",
+        "ratio_verbs": "Ratio de verbes"
+    },
+    width=780,
+    height=600
+)
+fig.show()
+######################################################################################
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from scipy.cluster.hierarchy import linkage, dendrogram
+
+#Définir la taille
+plt.figure(figsize=(15, 7))  
+
+Z = linkage(X,method='ward')
+
+#Création du dendrograme
+dendrogram(
+    Z,
+    labels=txt_annotation["titre"].values,   
+    leaf_rotation=90,                   
+    leaf_font_size=8,                  
+    distance_sort='ascending'
+)
+
+plt.title("Dendrogramme des textes ")
+plt.xlabel("Titre de l'œuvre")
+plt.ylabel("Distance (similitude)")
+
+plt.tight_layout()
+plt.show()
+######################################################################################
+```
+
+
+
+
+
