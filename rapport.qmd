@@ -1,6 +1,6 @@
 ---
 title: "Analyse Stylométrique de La Comédie Humaine"
-author: "Asso et Antony"
+author: "Asso Ali Mullud et Antony Lehmann"
 date: "12/05/2025"
 format:
   html:
