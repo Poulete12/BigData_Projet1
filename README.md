@@ -35,7 +35,7 @@ Ce projet réalise une analyse stylométrique de **La Comédie Humaine** d’Hon
    - La génération des visualisations et analyses.
 
 ## Auteurs
-**Asso** et **Antony**
+**Asso Ali Mullud** et **Antony Lehmann**
 
 ## Date
 12/05/2025
